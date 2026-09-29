@@ -1,7 +1,14 @@
 [project]
 name = "Phishing-checker"
 version = "0.1.0"
-dependences = []
+dependences = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "transformers",
+    "torch",
+    "beautifulsoup4"
+]
 
 [tool.vercel]
 entrypoint = "backend.main:app"
