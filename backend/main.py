@@ -138,5 +138,4 @@ def analyze_eml(file: UploadFile = File(...)):
         raise HTTPException(422, "No readable body found in this message.")
     return analyze(subject, text, hrefs, headers)
 
-
 app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
