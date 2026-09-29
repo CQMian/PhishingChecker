@@ -1,4 +1,4 @@
-"""Phishing email detector: FastAPI backend around cybersectony/phishing-email-detection-distilbert_v2.4.1."""
+"""Phishing email detector: FastAPI backend around cybersectony/phishing-email-detection-distilbert_v2.4.1 (ONNX int8)."""
 #imports
 import re
 from contextlib import asynccontextmanager
@@ -6,14 +6,14 @@ from email import policy
 from email.parser import BytesParser
 from pathlib import Path
 
-import torch
+import numpy as np
+import onnxruntime as ort
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoTokenizer
 
-MODEL_ID = "cybersectony/phishing-email-detection-distilbert_v2.4.1"
 LABELS = ["legitimate_email", "phishing_email", "legitimate_url", "phishing_url"]
 EMAIL_PAIR = (0, 1)  # (legitimate_email, phishing_email): used for the email text
 URL_PAIR = (2, 3)    # (legitimate_url, phishing_url): used for each URL
@@ -23,14 +23,21 @@ HIGH, MEDIUM = 0.70, 0.40  # verdict thresholds on the email phishing score
 LINK_FLAG = 0.50           # a URL at or above this phishing score is flagged as suspicious
 
 URL_RE = re.compile(r"https?://[^\s<>\"'\)\]]+", re.I)
-FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
+ROOT = Path(__file__).resolve().parent.parent
+FRONTEND = ROOT / "frontend"
+ONNX_DIR = ROOT / "onnx_quant"
 ml: dict = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    ml["tokenizer"] = AutoTokenizer.from_pretrained(MODEL_ID)
-    ml["model"] = AutoModelForSequenceClassification.from_pretrained(MODEL_ID).eval()
+    ml["tokenizer"] = AutoTokenizer.from_pretrained(ONNX_DIR)
+    so = ort.SessionOptions()
+    so.intra_op_num_threads = 1
+    ml["session"] = ort.InferenceSession(
+        str(ONNX_DIR / "model_quantized.onnx"), so, providers=["CPUExecutionProvider"]
+    )
+    ml["input_names"] = {i.name for i in ml["session"].get_inputs()}
     yield
     ml.clear()
 
@@ -43,14 +50,16 @@ class TextIn(BaseModel):
     text: str = Field(min_length=1, max_length=200_000)
 
 
-def classify(texts: list[str], pair: tuple[int, int]) -> list[dict]:
+def classify(texts: list[str], pair: tuple[int, int], max_length: int = 512) -> list[dict]:
     """Score texts using only the (legitimate, phishing) class pair, renormalized to sum to 1."""
     legit_i, phish_i = pair
-    inputs = ml["tokenizer"](
-        texts, return_tensors="pt", truncation=True, max_length=512, padding=True
+    enc = ml["tokenizer"](
+        texts, return_tensors="np", truncation=True, max_length=max_length, padding=True
     )
-    with torch.inference_mode():
-        probs = torch.softmax(ml["model"](**inputs).logits, dim=-1)
+    feed = {k: v for k, v in enc.items() if k in ml["input_names"]}
+    logits = ml["session"].run(None, feed)[0]
+    e = np.exp(logits - logits.max(axis=-1, keepdims=True))
+    probs = e / e.sum(axis=-1, keepdims=True)
     out = []
     for row in probs.tolist():
         legit, phish = row[legit_i], row[phish_i]
@@ -85,7 +94,8 @@ def verdict_for(score: float) -> str:
 def analyze(subject: str, body: str, hrefs: list[str] | None = None, headers: dict | None = None) -> dict:
     urls = extract_urls(body, hrefs or [])
     email_result = classify([build_email_input(subject, urls, body)], EMAIL_PAIR)[0]
-    links = [{"url": u, **r} for u, r in zip(urls, classify(urls, URL_PAIR))] if urls else []
+    # URLs are short, so cap at 128 tokens to keep the padded batch small
+    links = [{"url": u, **r} for u, r in zip(urls, classify(urls, URL_PAIR, max_length=128))] if urls else []
     for l in links:
         l["suspicious"] = l["phishing_score"] >= LINK_FLAG
     score = email_result["phishing_score"]  # links are flagged, not scored

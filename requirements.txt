@@ -1,6 +1,7 @@
+onnxruntime
+transformers
 fastapi
 uvicorn[standard]
-python-multipart
-transformers
-torch
 beautifulsoup4
+python-multipart
+numpy
