@@ -1,2 +1,8 @@
+[project]
+name = "Phishing-checker"
+version = "0.1.0"
+requires-python = "==3.11.16"
+dependences = []
+
 [tool.vercel]
 entrypoint = "backend.main:app"
